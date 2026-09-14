@@ -4,6 +4,7 @@ step2_download.py — Download the discovered video using yt-dlp.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -11,11 +12,6 @@ from config import SOURCE_VIDEO, logger
 
 
 def download_video(url: str, dest: str = SOURCE_VIDEO) -> Path:
-    """
-    Download *url* to *dest* using yt-dlp.
-
-    Prefers MP4 H.264 + AAC so FFmpeg can handle it cleanly.
-    """
     import yt_dlp
 
     out_path = Path(dest)
@@ -27,21 +23,30 @@ def download_video(url: str, dest: str = SOURCE_VIDEO) -> Path:
         "merge_output_format": "mp4",
         "quiet": False,
         "no_warnings": False,
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 5,
+        "fragment_retries": 5,
         "socket_timeout": 30,
+        # Rotate through mobile player clients to bypass bot checks
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "mweb"]
+            }
+        },
     }
+
+    # Load cookies if exported to output/cookies.txt or passed via env variable
+    cookie_path = Path("output/cookies.txt")
+    if cookie_path.exists():
+        ydl_opts["cookiefile"] = str(cookie_path)
 
     logger.info("Downloading: %s", url)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
-    # yt-dlp may write source.mp4 or source.webm depending on format
     if not out_path.exists():
         alt = out_path.with_suffix(".mp4")
         if alt.exists():
             return alt
-        # search for any matching file
         matches = list(out_path.parent.glob(out_path.stem + ".*"))
         matches = [m for m in matches if m.suffix in (".mp4", ".webm", ".mkv")]
         if matches:
