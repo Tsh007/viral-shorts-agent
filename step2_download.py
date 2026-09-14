@@ -1,5 +1,5 @@
 """
-step2_download.py — Download video using OAuth authentication & Piped API fallbacks.
+step2_download.py — Download video with yt-dlp IPv4 bypass, Cobalt API, and Piped fallbacks.
 """
 
 from __future__ import annotations
@@ -9,44 +9,14 @@ import sys
 import requests
 from pathlib import Path
 
-from config import (
-    SOURCE_VIDEO,
-    YOUTUBE_CLIENT_ID,
-    YOUTUBE_CLIENT_SECRET,
-    YOUTUBE_REFRESH_TOKEN,
-    logger,
-)
+from config import SOURCE_VIDEO, logger
 
-PIPED_INSTANCES = [
+PIPED_NODES = [
     "https://pipedapi.kavin.rocks",
-    "https://api.piped.privacydev.net",
-    "https://pipedapi.palvelu.org",
+    "https://pipedapi.tokhmi.xyz",
+    "https://api.piped.projectsegfau.lt",
+    "https://pipedapi.smnz.de"
 ]
-
-
-def _get_access_token() -> str | None:
-    """Refreshes YouTube OAuth access token using existing environment credentials."""
-    if not all([YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN]):
-        logger.warning("YouTube OAuth credentials missing in environment.")
-        return None
-
-    try:
-        resp = requests.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "client_id": YOUTUBE_CLIENT_ID,
-                "client_secret": YOUTUBE_CLIENT_SECRET,
-                "refresh_token": YOUTUBE_REFRESH_TOKEN,
-                "grant_type": "refresh_token",
-            },
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            return resp.json().get("access_token")
-        logger.warning("OAuth token refresh failed: %d — %s", resp.status_code, resp.text)
-    except Exception as exc:
-        logger.warning("OAuth token request exception: %s", exc)
-    return None
 
 
 def _extract_video_id(url: str) -> str:
@@ -54,11 +24,38 @@ def _extract_video_id(url: str) -> str:
     return match.group(1) if match else url.split("/")[-1]
 
 
+def _download_via_cobalt(url: str, dest_path: Path) -> bool:
+    """Fallback: Stream directly using Cobalt API v7."""
+    logger.info("Attempting automated fallback download via Cobalt API...")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    
+    try:
+        resp = requests.post("https://api.cobalt.tools/", json={"url": url}, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            media_url = resp.json().get("url")
+            if media_url:
+                with requests.get(media_url, stream=True, timeout=60) as r:
+                    r.raise_for_status()
+                    with open(dest_path, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=1048576):
+                            f.write(chunk)
+                if dest_path.exists() and dest_path.stat().st_size > 0:
+                    logger.info("✓ Downloaded via Cobalt API")
+                    return True
+    except Exception as exc:
+        logger.warning("Cobalt fallback failed: %s", exc)
+    return False
+
+
 def _download_via_piped(video_id: str, dest_path: Path) -> bool:
     """Fallback: Stream directly from public Piped API nodes."""
-    logger.info("Attempting automated fallback download via Piped API...")
+    logger.info("Attempting automated fallback download via Piped APIs...")
 
-    for instance in PIPED_INSTANCES:
+    for instance in PIPED_NODES:
         try:
             resp = requests.get(f"{instance}/streams/{video_id}", timeout=10)
             if resp.status_code != 200:
@@ -69,7 +66,6 @@ def _download_via_piped(video_id: str, dest_path: Path) -> bool:
             if not video_streams:
                 continue
 
-            # Pick highest quality MP4 stream
             mp4_streams = [s for s in video_streams if s.get("format") == "MPEG_4" or "mp4" in s.get("mimeType", "")]
             target_stream = mp4_streams[0] if mp4_streams else video_streams[0]
             stream_url = target_stream.get("url")
@@ -106,24 +102,17 @@ def download_video(url: str, dest: str = SOURCE_VIDEO) -> Path:
         "no_warnings": False,
         "retries": 3,
         "socket_timeout": 30,
+        "source_address": "0.0.0.0",  # Force IPv4 to bypass GitHub Actions IPv6 blocks
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios", "web"]
+                "player_client": ["tv", "web_embedded"]
             }
         },
     }
 
-    # Attempt to authenticate yt-dlp using OAuth access token
-    access_token = _get_access_token()
-    if access_token:
-        logger.info("Authenticating yt-dlp request using YouTube OAuth token...")
-        ydl_opts["http_headers"] = {
-            "Authorization": f"Bearer {access_token}"
-        }
-
     logger.info("Downloading: %s", url)
 
-    # Attempt 1: Authenticated yt-dlp download
+    # Attempt 1: yt-dlp
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
@@ -138,7 +127,11 @@ def download_video(url: str, dest: str = SOURCE_VIDEO) -> Path:
     if alt.exists() and alt.stat().st_size > 0:
         return alt
 
-    # Attempt 2: Piped API streaming fallback
+    # Attempt 2: Cobalt API v7
+    if _download_via_cobalt(url, out_path):
+        return out_path
+
+    # Attempt 3: Piped API Network
     video_id = _extract_video_id(url)
     if _download_via_piped(video_id, out_path):
         return out_path
@@ -152,10 +145,5 @@ def main(url: str) -> Path:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python step2_download.py <VIDEO_URL>")
         sys.exit(1)
-    try:
-        main(sys.argv[1])
-    except Exception as exc:
-        logger.critical("Step 2 failed: %s", exc, exc_info=True)
-        sys.exit(1)
+    main(sys.argv[1])
