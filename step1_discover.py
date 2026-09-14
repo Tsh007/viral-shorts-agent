@@ -1,11 +1,5 @@
 """
-step1_discover.py — Discover the most viral YouTube Short from the last 24 hours.
-
-Uses YouTube Data API v3:
-  - search.list  (100 units per call, 100 calls/day free)
-  - videos.list  (1 unit per call, 10,000 units/day free)
-
-Finds videos with the highest Views-Per-Hour (VPH) velocity.
+step1_discover.py — Discover the most viral English/International YouTube Short.
 """
 
 from __future__ import annotations
@@ -30,9 +24,6 @@ from config import (
 BASE_URL = "https://www.googleapis.com/youtube/v3"
 
 
-# ---------------------------------------------------------------------------
-# ISO 8601 duration parser
-# ---------------------------------------------------------------------------
 def _parse_iso_duration(iso: str) -> int:
     """Parse PT45S / PT2M30S → total seconds."""
     m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso or "")
@@ -44,15 +35,17 @@ def _parse_iso_duration(iso: str) -> int:
     return hours * 3600 + minutes * 60 + seconds
 
 
-# ---------------------------------------------------------------------------
-# Search
-# ---------------------------------------------------------------------------
+def _is_devanagari_script(text: str) -> bool:
+    """Return True if text contains Devanagari (Hindi) characters."""
+    return bool(re.search(r"[\u0900-\u097F]", text))
+
+
 def _search_window(
     published_after: str,
     query: str,
     max_results: int = MAX_SEARCH_RESULTS,
 ) -> list[dict[str, Any]]:
-    """Run one search.list call. Returns list of raw items."""
+    """Search for viral videos enforcing US region and English language."""
     params = {
         "part": "snippet",
         "type": "video",
@@ -60,6 +53,8 @@ def _search_window(
         "videoDuration": "short",
         "publishedAfter": published_after,
         "q": query,
+        "regionCode": "US",             # Enforces US/Global region content
+        "relevanceLanguage": "en",      # Filters primarily for English metadata
         "maxResults": max_results,
         "key": YOUTUBE_API_KEY,
     }
@@ -72,18 +67,12 @@ def _search_window(
 
 
 def discover_viral_video() -> dict[str, Any] | None:
-    """
-    Multi-window, multi-query discovery.
-
-    Returns a dict with video_id, title, channel, published_at, views, vph,
-    duration_s, url — or None if nothing qualifies.
-    """
     now = datetime.now(timezone.utc)
-
-    # ── Phase 1: gather candidate IDs across windows & queries ──────────
     candidates: dict[str, dict[str, Any]] = {}
 
-    queries = ["#shorts", "#viral", "#trending", ""]
+    # Target English international viral niches
+    queries = ["#shorts", "viral shorts", "satisfying moments", "funny clips", "life hacks"]
+
     for hours in SEARCH_WINDOWS_HOURS:
         published_after = (now - timedelta(hours=hours)).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
@@ -99,19 +88,26 @@ def discover_viral_video() -> dict[str, Any] | None:
                 vid = item["id"].get("videoId")
                 if not vid or vid in candidates:
                     continue
+
                 snippet = item["snippet"]
+                title = snippet.get("title", "")
+
+                # Exclude any titles containing Devanagari script
+                if _is_devanagari_script(title):
+                    continue
+
                 candidates[vid] = {
                     "video_id": vid,
-                    "title": snippet.get("title", ""),
+                    "title": title,
                     "channel": snippet.get("channelTitle", ""),
                     "published_at": snippet.get("publishedAt", ""),
                 }
 
-    logger.info("Discovery: %d unique candidates collected.", len(candidates))
+    logger.info("Discovery: %d unique international candidates collected.", len(candidates))
     if not candidates:
         return None
 
-    # ── Phase 2: fetch durations + view counts ──────────────────────────
+    # Fetch details
     ids = list(candidates.keys())
     for i in range(0, len(ids), 50):
         batch = ids[i : i + 50]
@@ -136,7 +132,7 @@ def discover_viral_video() -> dict[str, Any] | None:
                 item["statistics"].get("viewCount", 0)
             )
 
-    # ── Phase 3: filter + VPH scoring ───────────────────────────────────
+    # Filter & score VPH
     qualified: list[dict[str, Any]] = []
     for vid, data in candidates.items():
         duration = data.get("duration_s", 0)
@@ -147,7 +143,6 @@ def discover_viral_video() -> dict[str, Any] | None:
         if views < MIN_VIEWS:
             continue
 
-        # Verify it's a true Short (HEAD request to /shorts/)
         try:
             head = requests.head(
                 f"https://www.youtube.com/shorts/{vid}",
@@ -170,7 +165,7 @@ def discover_viral_video() -> dict[str, Any] | None:
         qualified.append(data)
 
     if not qualified:
-        logger.warning("No qualified videos found after filtering.")
+        logger.warning("No qualified international videos found after filtering.")
         return None
 
     qualified.sort(key=lambda x: x["vph"], reverse=True)
@@ -187,9 +182,6 @@ def discover_viral_video() -> dict[str, Any] | None:
     return best
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 def main() -> dict[str, Any]:
     if not YOUTUBE_API_KEY:
         raise EnvironmentError("YOUTUBE_API_KEY is not set.")
